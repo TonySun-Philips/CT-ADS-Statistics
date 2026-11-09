@@ -1,0 +1,8 @@
+node_modules/
+.venv/
+__pycache__/
+.env
+.env.*
+!.env.example
+evals/reports/*
+!evals/reports/.gitkeep

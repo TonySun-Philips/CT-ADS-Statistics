@@ -1,0 +1,21 @@
+{
+	"mcpServers": {
+		"philips-azure-devops": {
+			"type": "stdio",
+			"command": "C:\\Program Files\\nodejs\\node.exe",
+			"args": [
+				"C:\\Users\\320330966\\Philips\\Software CoE - Documents\\05 Earth\\ADS\\ads-mcp-readonly\\src\\launcher.cjs",
+				"C:\\Users\\320330966\\Philips\\Software CoE - Documents\\05 Earth\\ADS\\ads-mcp-readonly\\node_modules\\azure-devops-mcp\\dist\\index.js"
+			],
+			"tools": [
+				"*"
+			],
+			"env": {
+				"NODE_USE_SYSTEM_CA": "1",
+				"AZURE_DEVOPS_URL": "https://tfsemea1.ta.philips.com/tfs",
+				"AZURE_DEVOPS_COLLECTION": "TPC_Region26",
+				"AZURE_DEVOPS_PROJECT": "SY_CT_Projects"
+			}
+		}
+	}
+}

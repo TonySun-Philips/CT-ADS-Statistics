@@ -1,0 +1,18 @@
+{
+  "name": "daily-bug-status",
+  "description": "Read-only daily Bug status report for Philips ADS using historical assignment and creation-date filters with ID pagination.",
+  "mcpServer": "philips-azure-devops",
+  "project": "SY_CT_Projects",
+  "workItemType": "Bug",
+  "everAssignedTo": "GAO, Hai Tao",
+  "startDate": "2026-10-08",
+  "pageSize": 200,
+  "reportDirectory": "evals/reports/daily-bugs",
+  "fields": [
+    "System.CreatedDate",
+    "System.Id",
+    "System.Title",
+    "System.State",
+    "System.Tags"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "philips-ads-bug-status-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "run:bugs": "node src/run-bug-status.mjs",
+    "test": "node --test tests/unit/*.test.mjs"
+  },
+  "dependencies": {
+    "exceljs": "4.4.0",
+    "jszip": "3.10.1"
+  }
+}

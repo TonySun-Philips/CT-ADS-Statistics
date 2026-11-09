@@ -1,0 +1,425 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "ADS: Save PAT Securely",
+			"type": "shell",
+			"command": "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $form = New-Object System.Windows.Forms.Form; $form.Text = 'Philips ADS - Tony-Vscode PAT'; $form.StartPosition = 'CenterScreen'; $form.ClientSize = New-Object System.Drawing.Size(520,175); $form.FormBorderStyle = 'FixedDialog'; $form.MaximizeBox = $false; $form.MinimizeBox = $false; $form.TopMost = $true; $label = New-Object System.Windows.Forms.Label; $label.Text = 'Paste the TOKEN VALUE for Tony-Vscode (not its name):'; $label.SetBounds(20,20,480,25); $tokenInput = New-Object System.Windows.Forms.TextBox; $tokenInput.SetBounds(20,50,480,25); $tokenInput.UseSystemPasswordChar = $true; $notice = New-Object System.Windows.Forms.Label; $notice.Text = 'Saved to your Windows user environment, not to a project file.'; $notice.SetBounds(20,85,480,25); $saveButton = New-Object System.Windows.Forms.Button; $saveButton.Text = 'Save and verify'; $saveButton.SetBounds(350,125,150,30); $form.AcceptButton = $saveButton; $script:patSaved = $false; $saveButton.Add_Click({ $patValue = $tokenInput.Text; try { if ([string]::IsNullOrWhiteSpace($patValue) -or $patValue.Length -lt 32 -or $patValue -match '\\s') { [void][System.Windows.Forms.MessageBox]::Show($form,'Enter the actual token value, not its name or a command.','Invalid token format'); return }; [Environment]::SetEnvironmentVariable('AZURE_DEVOPS_PAT',$patValue,'User'); $script:patSaved = $true; $tokenInput.Clear(); $form.Close() } catch { [void][System.Windows.Forms.MessageBox]::Show($form,'Could not save the token in the current Windows user environment.','Save failed') } finally { Remove-Variable patValue -ErrorAction SilentlyContinue } }); $form.Controls.AddRange(@($label,$tokenInput,$notice,$saveButton)); $form.Add_Shown({ $form.Activate(); $tokenInput.Focus() }); try { [void]$form.ShowDialog() } finally { $tokenInput.Clear(); $form.Dispose() }; if ($script:patSaved) { Write-Output 'PAT saved at user scope. Running read-only ADS verification.'; & 'C:\\Program Files\\nodejs\\node.exe' '${workspaceFolder}\\ads-mcp-readonly\\src\\verify.mjs'; exit $LASTEXITCODE } else { Write-Output 'PAT entry cancelled. Existing user credential was not changed.' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Diagnose VS Code MCP",
+			"type": "shell",
+			"command": "$codePath = Join-Path $env:LOCALAPPDATA 'Programs\\Microsoft VS Code\\bin\\code.cmd'; & $codePath --version; $helpText = (& $codePath --help | Out-String); Write-Output ('CLI supports MCP registration: ' + $helpText.Contains('--add-mcp')); $userMcp = Join-Path $env:APPDATA 'Code\\User\\mcp.json'; Write-Output ('Default user MCP config exists: ' + (Test-Path -LiteralPath $userMcp)); $settingsPath = Join-Path $env:APPDATA 'Code\\User\\settings.json'; if (Test-Path -LiteralPath $settingsPath) { Select-String -LiteralPath $settingsPath -Pattern '^\\s*\"(?:chat\\.mcp\\.access|chat\\.mcp\\.enabled|chat\\.mcp\\.discovery\\.enabled|security\\.workspace\\.trust\\.enabled)\"\\s*:' | ForEach-Object { $_.Line } }; $profilePath = Join-Path $env:APPDATA 'Code\\User\\profiles'; if (Test-Path -LiteralPath $profilePath) { Write-Output ('Additional profile directories: ' + @(Get-ChildItem -LiteralPath $profilePath -Directory).Count) }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Locate Workspace Profile",
+			"type": "shell",
+			"command": "$storagePath = Join-Path $env:APPDATA 'Code\\User\\globalStorage\\storage.json'; if (!(Test-Path -LiteralPath $storagePath)) { throw 'VS Code profile metadata not found' }; $storage = Get-Content -LiteralPath $storagePath -Raw | ConvertFrom-Json; $target = [IO.Path]::GetFullPath('${workspaceFolder}').TrimEnd('\\'); foreach ($profile in @($storage.userDataProfiles)) { if ($null -ne $profile) { Write-Output ('Profile name: ' + $profile.name); Write-Output ('Profile location: ' + $profile.location) } }; $matched = $false; foreach ($association in @($storage.profileAssociations.workspaces.PSObject.Properties)) { if ($null -eq $association) { continue }; try { $uri = [Uri]$association.Name; if ($uri.IsFile -and [IO.Path]::GetFullPath($uri.LocalPath).TrimEnd('\\') -ieq $target) { Write-Output ('Workspace profile ID: ' + $association.Value); $matched = $true } } catch {} }; Write-Output ('Explicit workspace profile association: ' + $matched)",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Register MCP With VS Code",
+			"type": "shell",
+			"command": "$configuration = Get-Content -LiteralPath '${workspaceFolder}\\.vscode\\mcp.json' -Raw | ConvertFrom-Json; $server = $configuration.servers.'philips-azure-devops'; $registration = [ordered]@{ name = 'philips-azure-devops'; type = 'stdio'; command = $server.command; args = @($server.args | ForEach-Object { $_.Replace('${workspaceFolder}', '${workspaceFolder}') }); env = $server.env }; $registration.args = @('${workspaceFolder}\\ads-mcp-readonly\\src\\launcher.cjs', '${workspaceFolder}\\ads-mcp-readonly\\node_modules\\azure-devops-mcp\\dist\\index.js'); $payload = $registration | ConvertTo-Json -Depth 10 -Compress; $nativePayload = $payload.Replace('\"','\\\"'); & 'C:\\Program Files\\nodejs\\node.exe' -e 'JSON.parse(process.argv[1]);console.log(process.argv[1].length)' $nativePayload; if ($LASTEXITCODE -ne 0) { throw 'MCP registration argument validation failed' }; $codePath = Join-Path $env:LOCALAPPDATA 'Programs\\Microsoft VS Code\\bin\\code.cmd'; & $codePath --add-mcp $nativePayload; if ($LASTEXITCODE -ne 0) { throw 'VS Code MCP registration failed' }; $userPath = Join-Path $env:APPDATA 'Code\\User\\mcp.json'; if (!(Test-Path -LiteralPath $userPath)) { throw 'Expected user MCP configuration was not created' }; $saved = Get-Content -LiteralPath $userPath -Raw | ConvertFrom-Json; if ($saved.servers.PSObject.Properties.Name -notcontains 'philips-azure-devops') { throw 'ADS server not found in user MCP configuration' }; Write-Output 'PASS: philips-azure-devops registered in VS Code user MCP configuration.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Register MCP With Validated Arguments",
+			"type": "shell",
+			"command": "$ErrorActionPreference = 'Stop'; $configuration = Get-Content -LiteralPath '${workspaceFolder}\\.vscode\\mcp.json' -Raw | ConvertFrom-Json; $server = $configuration.servers.'philips-azure-devops'; $registration = [ordered]@{ name = 'philips-azure-devops'; type = 'stdio'; command = $server.command; args = @('${workspaceFolder}\\ads-mcp-readonly\\src\\launcher.cjs', '${workspaceFolder}\\ads-mcp-readonly\\node_modules\\azure-devops-mcp\\dist\\index.js'); env = $server.env }; $payload = $registration | ConvertTo-Json -Depth 10 -Compress; $nativePayload = $payload.Replace([string][char]34, ([string][char]92 + [char]34)); & 'C:\\Program Files\\nodejs\\node.exe' -e 'JSON.parse(process.argv[1]);console.log(process.argv[1].length)' $nativePayload; if ($LASTEXITCODE -ne 0) { throw 'MCP registration argument validation failed' }; $codePath = Join-Path $env:LOCALAPPDATA 'Programs\\Microsoft VS Code\\bin\\code.cmd'; & $codePath --add-mcp $nativePayload; if ($LASTEXITCODE -ne 0) { throw 'VS Code MCP registration failed' }; $userPath = Join-Path $env:APPDATA 'Code\\User\\mcp.json'; if (!(Test-Path -LiteralPath $userPath)) { throw 'Expected user MCP configuration was not created' }; $saved = Get-Content -LiteralPath $userPath -Raw | ConvertFrom-Json; if ($saved.servers.PSObject.Properties.Name -notcontains 'philips-azure-devops') { throw 'ADS server not found in user MCP configuration' }; Write-Output 'PASS: philips-azure-devops registered in VS Code user MCP configuration.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Validate User MCP Configuration",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' '${workspaceFolder}\\ads-mcp-readonly\\src\\verify.mjs' --user; if ($LASTEXITCODE -ne 0) { throw 'User MCP configuration verification failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Validate Task Spec",
+			"type": "shell",
+			"command": "$task = Get-Content -LiteralPath '${workspaceFolder}\\ai-agent-harness\\agents\\tasks\\daily-bug-status.json' -Raw | ConvertFrom-Json; if ($task.mcpServer -ne 'philips-azure-devops' -or $task.project -ne 'SY_CT_Projects' -or $task.workItemType -ne 'Bug' -or $task.top -ne 200) { throw 'Daily Bug task definition is invalid' }; Write-Output 'PASS: daily Bug task definition is valid JSON and targets the expected read-only ADS project.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check Daily Runner",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Daily runner syntax check failed' }; $task = Get-Content -LiteralPath '${workspaceFolder}\\ai-agent-harness\\agents\\tasks\\daily-bug-status.json' -Raw | ConvertFrom-Json; $mcp = Get-Content -LiteralPath \"$env:APPDATA\\Code\\User\\mcp.json\" -Raw | ConvertFrom-Json; if (-not $mcp.servers.PSObject.Properties[$task.mcpServer]) { throw 'Configured MCP server missing' }; if ($mcp.servers.$($task.mcpServer).env.PSObject.Properties.Name -contains 'AZURE_DEVOPS_PAT') { throw 'PAT must not be in MCP config' }; Write-Output 'PASS: runner syntax, task JSON, and MCP configuration.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Run Daily Bug Report",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' '${workspaceFolder}\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Daily Bug report failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check Scheduler",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\scripts\\register-daily-task.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Scheduler script syntax check failed' }; Write-Output 'PASS: daily scheduler script syntax.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Validate Daily Agent",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Runner syntax check failed' }; & 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\scripts\\register-daily-task.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Scheduler syntax check failed' }; $task = Get-Content -LiteralPath '${workspaceFolder}\\ai-agent-harness\\agents\\tasks\\daily-bug-status.json' -Raw | ConvertFrom-Json; if ($task.workItemType -ne 'Bug') { throw 'Incorrect work item type' }; Write-Output 'PASS: runner, scheduler, task JSON.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check Task Name",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\scripts\\register-daily-task.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Scheduler syntax check failed' }; Write-Output 'PASS: scheduler syntax after task-name update.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Schedule Daily Bug Report",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\scripts\\register-daily-task.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Scheduler syntax check failed' }; & 'C:\\Program Files\\nodejs\\node.exe' '${workspaceFolder}\\ai-agent-harness\\scripts\\register-daily-task.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Could not register the daily Bug report task' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Diagnose Schedule Registration",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\scripts\\register-daily-task.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Scheduler syntax check failed' }; & 'C:\\Program Files\\nodejs\\node.exe' '${workspaceFolder}\\ai-agent-harness\\scripts\\register-daily-task.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Task registration failed; see Windows diagnostic above' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Register Daily Bug Task",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\scripts\\register-daily-task.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Scheduler syntax check failed' }; & 'C:\\Program Files\\nodejs\\node.exe' '${workspaceFolder}\\ai-agent-harness\\scripts\\register-daily-task.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Daily task registration failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Verify Daily Schedule",
+			"type": "shell",
+			"command": "$schedule = & schtasks.exe /Query /TN 'Philips ADS Daily Bug Status Agent' /V /FO LIST; if ($LASTEXITCODE -ne 0) { throw 'Scheduled task query failed' }; $schedule | Select-String -Pattern 'TaskName:|Next Run Time:|Status:|Logon Mode:|Last Result:|Run As User:' | ForEach-Object { $_.Line }; if (-not ($schedule | Select-String -Quiet -Pattern 'Status:\\s+Ready')) { throw 'Scheduled task is not Ready' }; Write-Output 'PASS: daily schedule is registered and Ready.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Test Scheduled Run",
+			"type": "shell",
+			"command": "& schtasks.exe /Run /TN 'Philips ADS Daily Bug Status Agent'; if ($LASTEXITCODE -ne 0) { throw 'Could not start the scheduled Agent task' }; Write-Output 'Triggered the registered daily task once for validation.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Confirm Scheduled Run",
+			"type": "shell",
+			"command": "$schedule = & schtasks.exe /Query /TN 'Philips ADS Daily Bug Status Agent' /V /FO LIST; if ($LASTEXITCODE -ne 0) { throw 'Scheduled task query failed' }; $schedule | Select-String -Pattern 'Next Run Time:|Status:|Last Result:|Run As User:' | ForEach-Object { $_.Line }; if (-not ($schedule | Select-String -Quiet -Pattern 'Last Result:\\s+0\\s*$')) { throw 'Scheduled task has not reported a successful run yet' }; Write-Output 'PASS: Task Scheduler launched the Agent successfully.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Verify Task Result",
+			"type": "shell",
+			"command": "$report = Get-Item -LiteralPath '${workspaceFolder}\\ai-agent-harness\\evals\\reports\\daily-bugs\\2026-10-29.md'; Write-Output \"Report last write: $($report.LastWriteTime)\"; $schedule = & schtasks.exe /Query /TN 'Philips ADS Daily Bug Status Agent' /V /FO LIST; if ($LASTEXITCODE -ne 0) { throw 'Scheduled task query failed' }; $schedule | Select-String -Pattern 'Next Run Time:|Status:|Last Result:' | ForEach-Object { $_.Line }; if (-not ($schedule | Select-String -Quiet -Pattern 'Status:\\s+Ready')) { throw 'Scheduled task has not returned to Ready state' }; if (-not ($schedule | Select-String -Quiet -Pattern 'Last Result:\\s+0\\s*$')) { throw 'Scheduled task did not finish successfully' }; Write-Output 'PASS: scheduled Agent completed successfully.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check Excel Runtime",
+			"type": "shell",
+			"command": "$python = Get-Command python.exe -ErrorAction SilentlyContinue; if ($python) { Write-Output \"Python: $($python.Source)\"; & $python.Source -c \"import openpyxl; print('openpyxl', openpyxl.__version__)\" 2>$null; if ($LASTEXITCODE -ne 0) { Write-Output 'openpyxl: not installed' } } else { Write-Output 'Python: not found' }; $xlsx = Test-Path -LiteralPath '${workspaceFolder}\\ads-mcp-readonly\\node_modules\\exceljs'; Write-Output \"ExcelJS installed: $xlsx\"; $xlsxWriter = Test-Path -LiteralPath '${workspaceFolder}\\ads-mcp-readonly\\node_modules\\xlsx'; Write-Output \"SheetJS installed: $xlsxWriter\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Detect Python Excel Support",
+			"type": "shell",
+			"command": "Get-Command python.exe,py.exe,python3.exe -ErrorAction SilentlyContinue | Select-Object Name,Source; Write-Output (\"openpyxl importable: \" + (& { try { & 'python.exe' -c 'import openpyxl; print(openpyxl.__version__)'; if ($LASTEXITCODE -eq 0) { $true } else { $false } } catch { $false } })); Write-Output (\"xlsxwriter importable: \" + (& { try { & 'python.exe' -c 'import xlsxwriter; print(xlsxwriter.__version__)'; if ($LASTEXITCODE -eq 0) { $true } else { $false } } catch { $false } }))",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Install Excel Libraries",
+			"type": "shell",
+			"command": "$proxy = [Net.WebRequest]::DefaultWebProxy.GetProxy([Uri]'https://registry.npmjs.org/'); if ($proxy.AbsoluteUri -eq 'https://registry.npmjs.org/') { throw 'No system proxy is available for npm' }; $env:NODE_USE_SYSTEM_CA = '1'; $env:PATH = 'C:\\Program Files\\nodejs;' + $env:PATH; & 'C:\\Program Files\\nodejs\\npm.cmd' install --prefix '${workspaceFolder}\\ai-agent-harness' --ignore-scripts --no-fund --no-audit --progress=false --fetch-retries=1 --fetch-timeout=120000 --maxsockets=2 --https-proxy $proxy.AbsoluteUri; if ($LASTEXITCODE -ne 0) { throw 'Excel dependency install failed' }; & 'C:\\Program Files\\nodejs\\npm.cmd' --prefix '${workspaceFolder}\\ai-agent-harness' ls --depth=0",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check npm Install State",
+			"type": "shell",
+			"command": "Get-Process node,npm -ErrorAction SilentlyContinue | Select-Object ProcessName,Id,StartTime; Get-ChildItem -LiteralPath '${workspaceFolder}\\ai-agent-harness' -Force | Select-Object Name,Mode",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Inspect npm Process",
+			"type": "shell",
+			"command": "Get-CimInstance Win32_Process -Filter 'ProcessId=912' -ErrorAction SilentlyContinue | Select-Object ProcessId,ExecutablePath,CommandLine; Get-ChildItem -LiteralPath \"$env:LOCALAPPDATA\\npm-cache\\_logs\" -Filter '*debug-0.log' | Sort-Object LastWriteTime -Descending | Select-Object -First 1 FullName,LastWriteTime",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Read npm Progress",
+			"type": "shell",
+			"command": "$log = Get-ChildItem -LiteralPath \"$env:LOCALAPPDATA\\npm-cache\\_logs\" -Filter '*debug-0.log' | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($log) { Write-Output \"Latest npm log: $($log.LastWriteTime)\"; Get-Content -LiteralPath $log.FullName -Tail 30 } else { Write-Output 'No npm debug log found.' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Confirm Excel Install",
+			"type": "shell",
+			"command": "$processes = @(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -match 'npm-cli.js' }); Write-Output \"npm processes: $($processes.Count)\"; Write-Output (\"Lockfile exists: \" + (Test-Path -LiteralPath '${workspaceFolder}\\ai-agent-harness\\package-lock.json')); Write-Output (\"ExcelJS installed: \" + (Test-Path -LiteralPath '${workspaceFolder}\\ai-agent-harness\\node_modules\\exceljs')); Write-Output (\"JSZip installed: \" + (Test-Path -LiteralPath '${workspaceFolder}\\ai-agent-harness\\node_modules\\jszip'))",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Confirm Install Artifacts",
+			"type": "shell",
+			"command": "Get-Process node -ErrorAction SilentlyContinue | Select-Object Id,StartTime; Test-Path -LiteralPath '${workspaceFolder}\\ai-agent-harness\\package-lock.json'; Test-Path -LiteralPath '${workspaceFolder}\\ai-agent-harness\\node_modules\\exceljs'; Test-Path -LiteralPath '${workspaceFolder}\\ai-agent-harness\\node_modules\\jszip'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Validate Updated Task",
+			"type": "shell",
+			"command": "$task = Get-Content -LiteralPath '${workspaceFolder}\\ai-agent-harness\\agents\\tasks\\daily-bug-status.json' -Raw | ConvertFrom-Json; if ($task.savedQueryName -ne 'Earth-bugs-SE' -or $task.startDate -ne '2026-10-08' -or $task.workItemType -ne 'Bug' -or $task.maxPerDay -gt 200 -or $task.fields -notcontains 'System.Tags') { throw 'Updated daily Bug task definition is invalid' }; Write-Output 'PASS: daily date range, saved-query reference, field list, and safe page limit.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check Report Model",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\src\\bug-report-model.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Report model syntax check failed' }; Write-Output 'PASS: report classification and aggregation model parses.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check Excel Report Builder",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\src\\xlsx-report.mjs'; if ($LASTEXITCODE -ne 0) { throw 'XLSX report builder syntax check failed' }; Write-Output 'PASS: XLSX report builder parses.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check Daily Excel Runner",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Daily runner syntax check failed' }; & 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\src\\xlsx-report.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Excel report syntax check failed' }; Write-Output 'PASS: daily query runner and Excel writer parse.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Test Bug Classification",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --test '${workspaceFolder}\\ai-agent-harness\\tests\\unit\\bug-report-model.test.mjs'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Test Excel Workbook",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --test '${workspaceFolder}\\ai-agent-harness\\tests\\unit\\xlsx-report.test.mjs'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Validate Historical Assignee",
+			"type": "shell",
+			"command": "$task = Get-Content -LiteralPath '${workspaceFolder}\\ai-agent-harness\\agents\\tasks\\daily-bug-status.json' -Raw | ConvertFrom-Json; if ($task.everAssignedTo -ne 'GAO, Hai Tao' -or $task.startDate -ne '2026-10-08' -or $task.workItemType -ne 'Bug' -or $task.fields -notcontains 'System.Tags') { throw 'Historical assignee task definition is invalid' }; Write-Output 'PASS: historical-assignee filter and date range are configured.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check Historical WIQL",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Historical WIQL runner syntax check failed' }; & 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\src\\xlsx-report.mjs'; if ($LASTEXITCODE -ne 0) { throw 'XLSX report syntax check failed' }; Write-Output 'PASS: historical-assignee WIQL and report metadata parse.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Generate Daily Excel",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Runner syntax check failed' }; & 'C:\\Program Files\\nodejs\\node.exe' '${workspaceFolder}\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Daily Excel generation failed; check local logs' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Run Unit Tests",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --test '${workspaceFolder}\\ai-agent-harness\\tests\\unit\\*.test.mjs'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Test Local Date Grouping",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --test '${workspaceFolder}\\ai-agent-harness\\tests\\unit\\*.test.mjs'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Retest Local Dates",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --test '${workspaceFolder}\\ai-agent-harness\\tests\\unit\\*.test.mjs'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Run npm Tests",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\npm.cmd' --prefix '${workspaceFolder}\\ai-agent-harness' test; if ($LASTEXITCODE -ne 0) { throw 'Harness npm tests failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Rerun npm Tests",
+			"type": "shell",
+			"command": "$env:PATH = 'C:\\Program Files\\nodejs;' + $env:PATH; & 'C:\\Program Files\\nodejs\\npm.cmd' --prefix '${workspaceFolder}\\ai-agent-harness' test; if ($LASTEXITCODE -ne 0) { throw 'Harness npm tests failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Regenerate Daily Excel",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' '.\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Daily Excel generation failed; check local logs' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Verify Final Workbook",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' -e \"const ExcelJS=require('./ai-agent-harness/node_modules/exceljs'); const JSZip=require('./ai-agent-harness/node_modules/jszip'); (async()=>{const p='./ai-agent-harness/evals/reports/daily-bugs/2026-11-02.xlsx'; const w=new ExcelJS.Workbook(); await w.xlsx.readFile(p); const names=w.worksheets.map(s=>s.name); const required=['RawData','Resolution','每日Issue统计','Daily']; if(required.some(n=>!names.includes(n))) throw Error('Missing report worksheet'); const z=await JSZip.loadAsync(require('fs').readFileSync(p)); const chart=await z.file('xl/charts/chart1.xml').async('string'); if(!chart.includes('lineChart')) throw Error('Missing native line chart'); console.log('PASS: worksheets='+names.join(', ')); console.log('PASS: RawData rows='+w.getWorksheet('RawData').rowCount+', Resolution rows='+w.getWorksheet('Resolution').rowCount); console.log('PASS: native Created Issue line chart.');})().catch(e=>{console.error(e.message);process.exit(1)})\"; if ($LASTEXITCODE -ne 0) { throw 'Final Excel verification failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check Daily Task Remains Active",
+			"type": "shell",
+			"command": "$schedule = & schtasks.exe /Query /TN 'Philips ADS Daily Bug Status Agent' /V /FO LIST; if ($LASTEXITCODE -ne 0) { throw 'Scheduled task query failed' }; $schedule | Select-String -Pattern 'Next Run Time:|Status:|Last Result:' | ForEach-Object { $_.Line }; if (-not ($schedule | Select-String -Quiet -Pattern 'Status:\\s+Ready')) { throw 'Daily schedule is not Ready' }; Write-Output 'PASS: existing daily schedule remains Ready with the updated runner.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Verify Generated Workbook",
+			"type": "shell",
+			"command": "$code = @'\nimport assert from 'node:assert/strict';\nimport { createRequire } from 'node:module';\nimport { readFile } from 'node:fs/promises';\nimport path from 'node:path';\nconst require = createRequire(path.join(process.cwd(), 'ai-agent-harness', 'package.json'));\nconst ExcelJS = require('exceljs');\nconst JSZip = require('jszip');\nconst report = path.join(process.cwd(), 'ai-agent-harness', 'evals', 'reports', 'daily-bugs', '2026-11-02.xlsx');\nconst workbook = new ExcelJS.Workbook();\nawait workbook.xlsx.readFile(report);\nconst names = workbook.worksheets.map(sheet => sheet.name);\nassert.deepEqual(names, ['RawData', 'Resolution', '每日Issue统计', 'Daily']);\nassert.equal(workbook.getWorksheet('RawData').rowCount, 275);\nconst zip = await JSZip.loadAsync(await readFile(report));\nconst chart = await zip.file('xl/charts/chart1.xml')?.async('string');\nassert.match(chart || '', /lineChart/);\nconsole.log(`PASS: worksheets ${names.join(', ')}`);\nconsole.log(`PASS: ${workbook.getWorksheet('RawData').rowCount - 1} Bug records in RawData`);\nconsole.log('PASS: native Created Issue line chart.');\n'@; $code | & 'C:\\Program Files\\nodejs\\node.exe' --input-type=module; if ($LASTEXITCODE -ne 0) { throw 'Generated workbook validation failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Verify XLSX Contents",
+			"type": "shell",
+			"command": "$code = @'\nimport assert from 'node:assert/strict';\nimport { createRequire } from 'node:module';\nimport { readFile } from 'node:fs/promises';\nimport path from 'node:path';\nconst require = createRequire(path.join(process.cwd(), 'ai-agent-harness', 'package.json'));\nconst ExcelJS = require('exceljs');\nconst JSZip = require('jszip');\nconst report = path.join(process.cwd(), 'ai-agent-harness', 'evals', 'reports', 'daily-bugs', '2026-11-02.xlsx');\nconst workbook = new ExcelJS.Workbook();\nawait workbook.xlsx.readFile(report);\nconst names = workbook.worksheets.map(sheet => sheet.name);\nassert.deepEqual(names, ['RawData', 'Resolution', '\\u6bcf\\u65e5Issue\\u7edf\\u8ba1', 'Daily']);\nassert.equal(workbook.getWorksheet('RawData').rowCount, 275);\nconst zip = await JSZip.loadAsync(await readFile(report));\nconst chart = await zip.file('xl/charts/chart1.xml')?.async('string');\nassert.match(chart || '', /lineChart/);\nconsole.log(`PASS: worksheets ${names.join(', ')}`);\nconsole.log(`PASS: ${workbook.getWorksheet('RawData').rowCount - 1} Bug records in RawData`);\nconsole.log('PASS: native Created Issue line chart.');\n'@; $code | & 'C:\\Program Files\\nodejs\\node.exe' --input-type=module; if ($LASTEXITCODE -ne 0) { throw 'Generated workbook validation failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Validate Pagination Config",
+			"type": "shell",
+			"command": "$task = Get-Content -LiteralPath '${workspaceFolder}\\ai-agent-harness\\agents\\tasks\\daily-bug-status.json' -Raw | ConvertFrom-Json; if ($task.pageSize -ne 200 -or $task.PSObject.Properties.Name -contains 'maxPerDay') { throw 'Expected a per-request page size with no daily cap' }; Write-Output 'PASS: 200 is a request page size only; no daily result cap is configured.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Test Unlimited Paging",
+			"type": "shell",
+			"command": "$code = @'\nimport assert from 'node:assert/strict';\nimport { collectAllIdPages } from './ai-agent-harness/src/query-paging.mjs';\nconst source = Array.from({length: 450}, (_, index) => ({id: index + 1}));\nconst result = await collectAllIdPages(async (afterId, pageSize) => source.filter(item => item.id > afterId).slice(0, pageSize));\nassert.equal(result.items.length, 450);\nassert.equal(new Set(result.items.map(item => item.id)).size, 450);\nassert.equal(result.requestCount, 3);\nconsole.log('PASS: all 450 records fetched once across 200/200/50 pages.');\n'@; $code | & 'C:\\Program Files\\nodejs\\node.exe' --input-type=module; if ($LASTEXITCODE -ne 0) { throw 'Pagination validation failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Check ID Pagination Runner",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '${workspaceFolder}\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw 'ID pagination runner syntax check failed' }; Write-Output 'PASS: Runner syntax after removing daily cap.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Test Excel Query Metadata",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --test '${workspaceFolder}\\ai-agent-harness\\tests\\unit\\xlsx-report.test.mjs'; if ($LASTEXITCODE -ne 0) { throw 'XLSX report regression test failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Test ID Pagination",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --test '${workspaceFolder}\\ai-agent-harness\\tests\\unit\\query-paging.test.mjs'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Full Test Suite",
+			"type": "shell",
+			"command": "$env:PATH = 'C:\\Program Files\\nodejs;' + $env:PATH; & 'C:\\Program Files\\nodejs\\npm.cmd' --prefix '${workspaceFolder}\\ai-agent-harness' test; if ($LASTEXITCODE -ne 0) { throw 'Harness tests failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Run Uncapped ADS Query",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' '.\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Uncapped ADS query failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Diagnose Assignee History",
+			"type": "shell",
+			"command": "$env:NODE_USE_SYSTEM_CA = '1'; $env:AZURE_DEVOPS_URL = 'https://tfsemea1.ta.philips.com/tfs'; $env:AZURE_DEVOPS_COLLECTION = 'TPC_Region26'; $env:AZURE_DEVOPS_PROJECT = 'SY_CT_Projects'; & 'C:\\Program Files\\nodejs\\node.exe' '.\\ads-mcp-readonly\\src\\launcher.cjs' '.\\ai-agent-harness\\scripts\\diagnose-assignee-history.mjs'; if ($LASTEXITCODE -ne 0) { throw 'ADS revision history diagnosis failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Diagnose Assignee History Retry",
+			"type": "shell",
+			"command": "$env:NODE_USE_SYSTEM_CA = '1'; $env:AZURE_DEVOPS_URL = 'https://tfsemea1.ta.philips.com/tfs'; $env:AZURE_DEVOPS_COLLECTION = 'TPC_Region26'; $env:AZURE_DEVOPS_PROJECT = 'SY_CT_Projects'; & 'C:\\Program Files\\nodejs\\node.exe' '.\\ads-mcp-readonly\\src\\launcher.cjs' '.\\ai-agent-harness\\scripts\\diagnose-assignee-history.mjs'; if ($LASTEXITCODE -ne 0) { throw 'ADS revision history diagnosis failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Inspect 11-02 Report IDs",
+			"type": "shell",
+			"command": "$code = @'\nimport assert from 'node:assert/strict';\nimport { createRequire } from 'node:module';\nimport path from 'node:path';\nconst require = createRequire(path.join(process.cwd(), 'ai-agent-harness', 'package.json'));\nconst ExcelJS = require('exceljs');\nconst workbook = new ExcelJS.Workbook();\nawait workbook.xlsx.readFile(path.join(process.cwd(), 'ai-agent-harness', 'evals', 'reports', 'daily-bugs', '2026-11-02.xlsx'));\nconst sheet = workbook.getWorksheet('RawData');\nconst rows = new Map();\nsheet.eachRow((row, number) => { if (number > 1) rows.set(Number(row.getCell(2).value), {state: row.getCell(4).value, title: row.getCell(3).value}); });\nconst ids = [963809,964001,964031,964041,964686,964752,964985,965153,966080,966768,967055,967056,967066,967986,968046,968688,968839,968923,969332];\nconsole.log(JSON.stringify({total: rows.size, included: ids.filter(id => rows.has(id)).length, absent: ids.filter(id => !rows.has(id)), includedRows: ids.filter(id => rows.has(id)).map(id => ({id, ...rows.get(id)}))}, null, 2));\n'@; $code | & 'C:\\Program Files\\nodejs\\node.exe' --input-type=module; if ($LASTEXITCODE -ne 0) { throw 'Report inspection failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Compare EVER Identity Matching",
+			"type": "shell",
+			"command": "$env:NODE_USE_SYSTEM_CA = '1'; $env:AZURE_DEVOPS_URL = 'https://tfsemea1.ta.philips.com/tfs'; $env:AZURE_DEVOPS_COLLECTION = 'TPC_Region26'; $env:AZURE_DEVOPS_PROJECT = 'SY_CT_Projects'; & 'C:\\Program Files\\nodejs\\node.exe' '.\\ads-mcp-readonly\\src\\launcher.cjs' '.\\ai-agent-harness\\scripts\\diagnose-ever-identity.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Identity-match diagnosis failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Check Revision Audit Script",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' --check '.\\ai-agent-harness\\scripts\\diagnose-ever-identity.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Revision audit script syntax failed' }; Write-Output 'PASS: revision audit script syntax.'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ADS: Audit Listed Bug Revisions",
+			"type": "shell",
+			"command": "$env:NODE_USE_SYSTEM_CA = '1'; $env:AZURE_DEVOPS_URL = 'https://tfsemea1.ta.philips.com/tfs'; $env:AZURE_DEVOPS_COLLECTION = 'TPC_Region26'; $env:AZURE_DEVOPS_PROJECT = 'SY_CT_Projects'; & 'C:\\Program Files\\nodejs\\node.exe' '.\\ads-mcp-readonly\\src\\launcher.cjs' '.\\ai-agent-harness\\scripts\\diagnose-ever-identity.mjs'; if ($LASTEXITCODE -ne 0) { throw 'Revision audit failed' }",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Agent Harness: Generate 11-02 Report",
+			"type": "shell",
+			"command": "& 'C:\\Program Files\\nodejs\\node.exe' '.\\ai-agent-harness\\src\\run-bug-status.mjs'; if ($LASTEXITCODE -ne 0) { throw '11-02 report generation failed; see local run log' }",
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}
